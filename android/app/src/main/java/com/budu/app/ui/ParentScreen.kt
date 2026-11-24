@@ -42,6 +42,7 @@ fun ParentScreen(
     var language by remember(settings) { mutableStateOf(settings.languageTag) }
     var limit by remember(settings) { mutableStateOf(settings.dailyLimitMinutes.toString()) }
     var images by remember(settings) { mutableStateOf(settings.imagesEnabled) }
+    var naturalVoice by remember(settings) { mutableStateOf(settings.naturalVoice) }
     var serverUrl by remember(settings) { mutableStateOf(settings.serverUrl) }
     var token by remember(settings) { mutableStateOf(settings.appToken) }
     var newPin by remember { mutableStateOf("") }
@@ -78,6 +79,10 @@ fun ParentScreen(
                 Text("Allow Budu to draw pictures", Modifier.weight(1f))
                 Switch(checked = images, onCheckedChange = { images = it })
             }
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Text("Natural Google voice (off = tablet voice)", Modifier.weight(1f))
+                Switch(checked = naturalVoice, onCheckedChange = { naturalVoice = it })
+            }
             OutlinedTextField(
                 value = serverUrl, onValueChange = { serverUrl = it.trim() },
                 label = { Text("Server URL") }, singleLine = true,
@@ -104,6 +109,7 @@ fun ParentScreen(
                             languageTag = language.ifBlank { "en-US" },
                             dailyLimitMinutes = limit.toIntOrNull() ?: settings.dailyLimitMinutes,
                             imagesEnabled = images,
+                            naturalVoice = naturalVoice,
                             serverUrl = serverUrl.ifBlank { settings.serverUrl },
                             appToken = token,
                             pin = if (newPin.length >= 4) newPin else settings.pin,

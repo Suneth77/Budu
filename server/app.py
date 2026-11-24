@@ -39,10 +39,16 @@ log = logging.getLogger("budu")
 CLAUDE_MODEL = os.getenv("CLAUDE_MODEL", "claude-haiku-5-5")  # fast + cheap, good for short replies
 APP_TOKEN = os.getenv("APP_TOKEN", "")
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")
-IMAGE_MODEL = os.getenv("IMAGE_MODEL", "gpt-image-1")
+IMAGE_MODEL = os.getenv("IMAGE_MODEL", "gpt-image-2")
 IMAGE_QUALITY = os.getenv("IMAGE_QUALITY", "low")  # low = faster + cheaper
 MAX_CHATS_PER_MINUTE = int(os.getenv("MAX_CHATS_PER_MINUTE", "20"))
 MAX_IMAGES_PER_HOUR = int(os.getenv("MAX_IMAGES_PER_HOUR", "15"))
+
+# Google Cloud Text-to-Speech (Budu's natural voice)
+GOOGLE_TTS_API_KEY = os.getenv("GOOGLE_TTS_API_KEY", "")
+GOOGLE_TTS_VOICE = os.getenv("GOOGLE_TTS_VOICE", "Leda")  # a Chirp 3 HD voice name
+GOOGLE_TTS_SPEAKING_RATE = os.getenv("GOOGLE_TTS_SPEAKING_RATE", "")  # e.g. 0.9; empty = normal
+MAX_SPEAK_PER_MINUTE = int(os.getenv("MAX_SPEAK_PER_MINUTE", "40"))
 
 EMOTIONS = {"happy", "excited", "surprised", "sad", "calm", "curious"}
 
@@ -63,12 +69,23 @@ class ChatRequest(BaseModel):
     child_name: str | None = Field(default=None, max_length=40)
     language: str = Field(default="English", max_length=40)
     images_enabled: bool = True
+    voice_language: str | None = Field(default=None, max_length=20)  # e.g. "et-EE"; set = return audio too
 
 
 class ChatResponse(BaseModel):
     reply: str
     emotion: str
     image_prompt: str | None = None
+    audio_base64: str | None = None  # MP3 of the reply, if the Google voice is set up
+
+
+class SpeakRequest(BaseModel):
+    text: str = Field(min_length=1, max_length=400)
+    language: str = Field(default="en-US", max_length=20)
+
+
+class SpeakResponse(BaseModel):
+    audio_base64: str | None = None
 
 
 class ImageRequest(BaseModel):
@@ -102,8 +119,17 @@ def authorize(request: Request, token: str | None) -> str:
 
 
 def system_prompt(body: ChatRequest) -> str:
-    name = body.child_name.strip() if body.child_name else ""
+    # Keep only letters, spaces, hyphens and apostrophes (works for Estonian names like "Mõnika").
+    name = re.sub(r"[^\w\s'-]", "", body.child_name or "").strip()[:40]
     who = f"a 3-4 year old child named {name}" if name else "a 3-4 year old child"
+    name_rule = (
+        f"- The child's name is {name}. Use it naturally now and then, like a real friend would: "
+        "when saying hello, cheering them on, comforting them, or asking them something. "
+        "About every second or third reply, not in every sentence. "
+        f'Spell it exactly as "{name}".'
+        if name
+        else '- You don\'t know the child\'s name. Don\'t ask for it; call them "friend" instead.'
+    )
     images = (
         "If the child asks to SEE something (a picture, a drawing, a video) and it is "
         "child-appropriate, set image_prompt to a short, simple ENGLISH description of it, "
@@ -117,6 +143,7 @@ def system_prompt(body: ChatRequest) -> str:
 
 How you talk:
 - Speak {body.language}.
+{name_rule}
 - Very short: 1-3 tiny sentences, under 30 words in total. Simple words a 3-year-old knows.
 - Warm, silly, encouraging. Often end with one easy question to keep playing.
 - You can play pretend, sing simple made-up songs, count, name colors and animals, tell tiny stories.
@@ -155,6 +182,43 @@ def to_claude_messages(history: list[Turn], message: str) -> list[dict]:
     return merged
 
 
+_SHORT_LANG = {"en": "en-US", "et": "et-EE", "ru": "ru-RU", "fi": "fi-FI", "de": "de-DE",
+               "lv": "lv-LV", "lt": "lt-LT", "uk": "uk-UA", "sv": "sv-SE", "fr": "fr-FR", "es": "es-ES"}
+
+
+def synthesize(text: str, language_tag: str | None) -> str | None:
+    """Turn text into speech with a Google Chirp 3 HD voice. Returns base64 MP3, or None."""
+    if not GOOGLE_TTS_API_KEY or not text.strip():
+        return None
+    tag = (language_tag or "en-US").strip().replace("_", "-")
+    if re.fullmatch(r"[a-z]{2,3}", tag):
+        tag = _SHORT_LANG.get(tag, "en-US")
+    if not re.fullmatch(r"[a-z]{2,3}-[A-Z]{2}", tag):
+        tag = "en-US"
+    audio_config: dict = {"audioEncoding": "MP3"}
+    if GOOGLE_TTS_SPEAKING_RATE:
+        audio_config["speakingRate"] = float(GOOGLE_TTS_SPEAKING_RATE)
+    try:
+        r = httpx.post(
+            "https://texttospeech.googleapis.com/v1/text:synthesize",
+            headers={"X-Goog-Api-Key": GOOGLE_TTS_API_KEY},
+            json={
+                "input": {"text": text},
+                "voice": {"languageCode": tag, "name": f"{tag}-Chirp3-HD-{GOOGLE_TTS_VOICE}"},
+                "audioConfig": audio_config,
+            },
+            timeout=15,
+        )
+    except httpx.HTTPError as exc:
+        log.error("Google TTS request failed: %s", type(exc).__name__)
+        return None
+    if r.status_code != 200:
+        # Google's error text explains the problem (bad key, API not enabled, unknown voice...).
+        log.error("Google TTS returned %s: %s", r.status_code, r.text[:400])
+        return None
+    return r.json().get("audioContent")
+
+
 def parse_budu_json(raw: str) -> dict:
     match = re.search(r"\{.*\}", raw, re.DOTALL)
     try:
@@ -178,7 +242,7 @@ def parse_budu_json(raw: str) -> dict:
 
 @app.get("/health")
 def health():
-    return {"ok": True, "model": CLAUDE_MODEL, "images": bool(OPENAI_API_KEY)}
+    return {"ok": True, "model": CLAUDE_MODEL, "images": bool(OPENAI_API_KEY), "voice": bool(GOOGLE_TTS_API_KEY)}
 
 
 @app.post("/chat", response_model=ChatResponse)
@@ -195,19 +259,32 @@ def chat(body: ChatRequest, request: Request, x_app_token: str | None = Header(d
         )
         raw = "".join(block.text for block in result.content if block.type == "text")
     except Exception as exc:
-        log.error("Claude call failed: %s", type(exc).__name__)
+        # The error text comes from Anthropic (e.g. "credit balance too low", "model not found");
+        # it never contains what the child said.
+        log.error("Claude call failed: %s: %s", type(exc).__name__, exc)
         raise HTTPException(status_code=502, detail="Budu's brain is not reachable right now")
 
     out = parse_budu_json(raw)
 
     if not is_safe_reply(out["reply"]):
         log.info("Reply blocked by safety filter")
-        return ChatResponse(**SAFE_FALLBACK)
+        out = dict(SAFE_FALLBACK)
 
     if out["image_prompt"] and (not body.images_enabled or not is_safe_image_prompt(out["image_prompt"])):
         out["image_prompt"] = None
 
+    if body.voice_language:
+        out["audio_base64"] = synthesize(out["reply"], body.voice_language)
+
     return ChatResponse(**out)
+
+
+@app.post("/speak", response_model=SpeakResponse)
+def speak(body: SpeakRequest, request: Request, x_app_token: str | None = Header(default=None)):
+    """Speak Budu's fixed lines (greeting, "didn't hear you", sleepy) in the natural voice."""
+    client_id = authorize(request, x_app_token)
+    rate_limit(f"speak:{client_id}", MAX_SPEAK_PER_MINUTE, 60)
+    return SpeakResponse(audio_base64=synthesize(body.text, body.language))
 
 
 @app.post("/image", response_model=ImageResponse)

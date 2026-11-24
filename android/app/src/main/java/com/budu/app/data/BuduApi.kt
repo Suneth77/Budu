@@ -13,7 +13,8 @@ import java.net.URL
 
 data class ChatTurn(val fromChild: Boolean, val text: String)
 
-data class BuduReply(val reply: String, val emotion: String, val imagePrompt: String?)
+/** [audio] is an MP3 of the reply in the natural Google voice, or null. */
+class BuduReply(val reply: String, val emotion: String, val imagePrompt: String?, val audio: ByteArray?)
 
 /** Talks to the Budu server (never directly to the AI services). */
 class BuduApi(private val baseUrl: String, private val appToken: String) {
@@ -24,6 +25,7 @@ class BuduApi(private val baseUrl: String, private val appToken: String) {
         childName: String,
         language: String,
         imagesEnabled: Boolean,
+        voiceLanguage: String?, // e.g. "et-EE" to also get the reply as audio; null = no audio
     ): BuduReply = withContext(Dispatchers.IO) {
         val body = JSONObject().apply {
             put("message", message)
@@ -35,14 +37,25 @@ class BuduApi(private val baseUrl: String, private val appToken: String) {
             if (childName.isNotBlank()) put("child_name", childName)
             put("language", language)
             put("images_enabled", imagesEnabled)
+            if (voiceLanguage != null) put("voice_language", voiceLanguage)
         }
         val json = post("/chat", body, readTimeoutMs = 30_000)
         BuduReply(
             reply = json.getString("reply"),
             emotion = json.optString("emotion", "happy"),
             imagePrompt = if (json.isNull("image_prompt")) null else json.optString("image_prompt").ifBlank { null },
+            audio = json.base64OrNull("audio_base64"),
         )
     }
+
+    /** Budu's fixed lines in the natural voice. Returns null if the voice isn't set up. */
+    suspend fun speak(text: String, languageTag: String): ByteArray? = withContext(Dispatchers.IO) {
+        val json = post("/speak", JSONObject().put("text", text).put("language", languageTag), readTimeoutMs = 20_000)
+        json.base64OrNull("audio_base64")
+    }
+
+    private fun JSONObject.base64OrNull(key: String): ByteArray? =
+        if (!has(key) || isNull(key)) null else Base64.decode(getString(key), Base64.DEFAULT)
 
     /** Returns null if the server declined or couldn't draw it. */
     suspend fun image(prompt: String): Bitmap? = withContext(Dispatchers.IO) {

@@ -10,6 +10,7 @@ data class Settings(
     val languageTag: String = "en-US",       // e.g. en-US, et-EE, ru-RU
     val dailyLimitMinutes: Int = 20,         // 0 = no limit
     val imagesEnabled: Boolean = true,
+    val naturalVoice: Boolean = true,        // Google voice via the server (falls back to the tablet voice)
     val serverUrl: String = "http://10.0.2.2:8000", // 10.0.2.2 = your computer, seen from the emulator
     val appToken: String = "",
 )
@@ -25,6 +26,7 @@ class SettingsStore(context: Context) {
             languageTag = prefs.getString("language", d.languageTag) ?: d.languageTag,
             dailyLimitMinutes = prefs.getInt("daily_limit", d.dailyLimitMinutes),
             imagesEnabled = prefs.getBoolean("images", d.imagesEnabled),
+            naturalVoice = prefs.getBoolean("natural_voice", d.naturalVoice),
             serverUrl = prefs.getString("server_url", d.serverUrl) ?: d.serverUrl,
             appToken = prefs.getString("app_token", d.appToken) ?: d.appToken,
         )
@@ -37,6 +39,7 @@ class SettingsStore(context: Context) {
             .putString("language", s.languageTag)
             .putInt("daily_limit", s.dailyLimitMinutes)
             .putBoolean("images", s.imagesEnabled)
+            .putBoolean("natural_voice", s.naturalVoice)
             .putString("server_url", s.serverUrl)
             .putString("app_token", s.appToken)
             .apply()

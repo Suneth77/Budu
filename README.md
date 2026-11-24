@@ -50,6 +50,9 @@ Keys:
   Without it Budu still talks, but can't draw.
 - `APP_TOKEN`: any long random text. Enter the same value in the app's parent settings.
 
+- `GOOGLE_TTS_API_KEY` (optional): Budu's natural voice (Google Chirp 3 HD). Without it the tablet's own voice is used.
+  Pick a voice with `GOOGLE_TTS_VOICE` (e.g. Leda, Aoede, Kore, Puck, Charon).
+
 Check it works: open http://localhost:8000/health in your browser. You should see `{"ok": true, ...}`.
 You can also try http://localhost:8000/docs to send a test message without the phone.
 
@@ -97,8 +100,8 @@ To change how a face looks, edit the numbers in `targetFor()` in `face/BuduFace.
 - **Videos** aren't generated: they're slow and expensive. Budu offers to draw a picture instead.
 - Phone speech recognition struggles with toddler speech. Test it, and consider recording audio
   and sending it to a cloud speech-to-text model (for example Whisper) through the server.
-- The phone's built-in voice is robotic. A cloud voice (Google, Azure, ElevenLabs) through
-  the server will sound much warmer.
+- The natural voice adds about a second before Budu speaks. If the Google voice fails, Budu
+  automatically uses the tablet voice instead.
 
 ## Before releasing on Google Play
 

@@ -18,9 +18,11 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.interaction.MutableInteractionSource
+import androidx.compose.foundation.interaction.collectIsPressedAsState
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.aspectRatio
 import androidx.compose.foundation.layout.fillMaxSize
@@ -29,6 +31,7 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.safeDrawingPadding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.KeyboardOptions
@@ -50,9 +53,11 @@ import androidx.compose.ui.draw.scale
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.asImageBitmap
+import androidx.compose.ui.hapticfeedback.HapticFeedbackType
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalHapticFeedback
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.text.style.TextAlign
@@ -74,7 +79,9 @@ fun KidScreen(
     val askMic = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
         if (granted) onTalk()
     }
+    val haptic = LocalHapticFeedback.current
     val talk = {
+        haptic.performHapticFeedback(HapticFeedbackType.LongPress) // instant "I felt that" buzz
         val granted = ContextCompat.checkSelfPermission(context, Manifest.permission.RECORD_AUDIO) ==
             PackageManager.PERMISSION_GRANTED
         if (granted) onTalk() else askMic.launch(Manifest.permission.RECORD_AUDIO)
@@ -107,8 +114,12 @@ fun KidScreen(
             when {
                 ui.timeIsUp -> Text("💤", fontSize = 64.sp)
                 ui.isThinking -> Text("💭", fontSize = 56.sp)
-                ui.isDrawing -> DrawingIndicator()
-                else -> TalkButton(listening = ui.isListening, onClick = talk)
+                ui.isDrawing -> Row(verticalAlignment = Alignment.CenterVertically) {
+                    TalkButton(listening = ui.isListening, ready = ui.micReady, onClick = talk)
+                    Spacer(Modifier.width(24.dp))
+                    DrawingIndicator()
+                }
+                else -> TalkButton(listening = ui.isListening, ready = ui.micReady, onClick = talk)
             }
 
             Spacer(Modifier.height(16.dp))
@@ -177,24 +188,38 @@ fun KidScreen(
     }
 }
 
+/**
+ * Big talk button.
+ *  blue 🎤   = tap me
+ *  orange 🎤 = getting the mic ready (wait a moment)
+ *  red 👂    = mic is open, talk now!
+ */
 @Composable
-private fun TalkButton(listening: Boolean, onClick: () -> Unit) {
+private fun TalkButton(listening: Boolean, ready: Boolean, onClick: () -> Unit) {
+    val interaction = remember { MutableInteractionSource() }
+    val pressed by interaction.collectIsPressedAsState()
+    val talkNow = listening && ready
     val pulse = rememberInfiniteTransition(label = "pulse")
-    val scale by pulse.animateFloat(
-        initialValue = 1f, targetValue = if (listening) 1.15f else 1.04f,
-        animationSpec = infiniteRepeatable(tween(if (listening) 400 else 1200), RepeatMode.Reverse),
+    val wobble by pulse.animateFloat(
+        initialValue = 1f, targetValue = if (talkNow) 1.15f else 1.04f,
+        animationSpec = infiniteRepeatable(tween(if (talkNow) 400 else 1200), RepeatMode.Reverse),
         label = "scale",
     )
+    val color = when {
+        talkNow -> Color(0xFFEF5350)
+        listening -> Color(0xFFFFA726)
+        else -> Color(0xFF42A5F5)
+    }
     Box(
         Modifier
             .size(112.dp)
-            .scale(scale)
+            .scale(if (pressed) 0.88f else wobble) // shrinks the instant a finger touches it
             .clip(CircleShape)
-            .background(if (listening) Color(0xFFEF5350) else Color(0xFF42A5F5))
-            .clickable(enabled = !listening) { onClick() },
+            .background(color)
+            .clickable(interactionSource = interaction, indication = null, enabled = !listening) { onClick() },
         contentAlignment = Alignment.Center,
     ) {
-        Text(if (listening) "👂" else "🎤", fontSize = 52.sp)
+        Text(if (talkNow) "👂" else "🎤", fontSize = 52.sp)
     }
 }
 

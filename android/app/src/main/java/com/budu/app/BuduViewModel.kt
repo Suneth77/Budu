@@ -12,6 +12,7 @@ import com.budu.app.data.SettingsStore
 import com.budu.app.face.Emotion
 import com.budu.app.speech.SpeechListener
 import com.budu.app.speech.Speaker
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -25,6 +26,7 @@ import java.util.Locale
 data class UiState(
     val emotion: Emotion = Emotion.HAPPY,
     val isListening: Boolean = false,
+    val micReady: Boolean = false,      // true once the mic is really open
     val isThinking: Boolean = false,
     val isSpeaking: Boolean = false,
     val isDrawing: Boolean = false,
@@ -55,6 +57,8 @@ class BuduViewModel(app: Application) : AndroidViewModel(app) {
     private val listener = SpeechListener(app, ::onSpeechEvent)
 
     private var ticker: Job? = null
+    private var listenWatchdog: Job? = null
+    private var voiceJob: Job? = null // fetching a natural-voice line
     private var parentMode = false
     private var greeted = false
 
@@ -63,6 +67,7 @@ class BuduViewModel(app: Application) : AndroidViewModel(app) {
     // ---------- lifecycle (called from MainActivity) ----------
 
     fun onAppVisible() {
+        listener.warmUp() // connect to the speech service now, so the first tap is fast
         refreshTimeLimit(announce = false)
         if (!greeted && !_ui.value.timeIsUp) {
             greeted = true
@@ -81,13 +86,14 @@ class BuduViewModel(app: Application) : AndroidViewModel(app) {
 
     fun onAppHidden() {
         ticker?.cancel()
-        listener.stop()
-        speaker.stop()
-        _ui.update { it.copy(isListening = false) }
+        listenWatchdog?.cancel()
+        listener.release()
+        stopTalking()
+        _ui.update { it.copy(isListening = false, micReady = false) }
     }
 
     override fun onCleared() {
-        listener.stop()
+        listener.release()
         speaker.shutdown()
     }
 
@@ -100,21 +106,35 @@ class BuduViewModel(app: Application) : AndroidViewModel(app) {
             _ui.update { it.copy(caption = "Speech recognition isn't available on this device.") }
             return
         }
-        speaker.stop()
-        _ui.update { it.copy(isListening = true, emotion = Emotion.LISTENING, caption = "") }
+        stopTalking()
+        _ui.update { it.copy(isListening = true, micReady = false, emotion = Emotion.LISTENING, caption = "") }
         listener.start(_settings.value.languageTag)
+
+        // Safety net: if the speech engine never answers, don't leave the button stuck.
+        listenWatchdog?.cancel()
+        listenWatchdog = viewModelScope.launch {
+            delay(15_000)
+            if (_ui.value.isListening) {
+                listener.stop()
+                _ui.update { it.copy(isListening = false, micReady = false) }
+                didNotHear()
+            }
+        }
     }
 
     fun closePicture() = _ui.update { it.copy(picture = null, emotion = Emotion.HAPPY) }
 
     private fun onSpeechEvent(e: SpeechListener.Event) {
         when (e) {
+            is SpeechListener.Event.Ready -> _ui.update { it.copy(micReady = true) }
             is SpeechListener.Event.Result -> {
-                _ui.update { it.copy(isListening = false) }
+                listenWatchdog?.cancel()
+                _ui.update { it.copy(isListening = false, micReady = false) }
                 if (e.text.isBlank()) didNotHear() else ask(e.text)
             }
             is SpeechListener.Event.Error -> {
-                _ui.update { it.copy(isListening = false) }
+                listenWatchdog?.cancel()
+                _ui.update { it.copy(isListening = false, micReady = false) }
                 didNotHear()
             }
             else -> Unit
@@ -135,16 +155,22 @@ class BuduViewModel(app: Application) : AndroidViewModel(app) {
                     childName = s.childName,
                     language = locale.getDisplayLanguage(Locale.ENGLISH).ifBlank { "English" },
                     imagesEnabled = s.imagesEnabled,
+                    voiceLanguage = if (s.naturalVoice) s.languageTag else null,
                 )
                 addToHistory(ChatTurn(fromChild = true, text = text))
                 addToHistory(ChatTurn(fromChild = false, text = reply.reply))
                 _ui.update { it.copy(isThinking = false) }
-                say(reply.reply, Emotion.fromServer(reply.emotion))
+                // If the server sent no audio, the Google voice isn't set up: use the tablet voice
+                // instead of asking the server again.
+                say(reply.reply, Emotion.fromServer(reply.emotion), audio = reply.audio, tabletVoiceOnly = reply.audio == null)
                 if (reply.imagePrompt != null && s.imagesEnabled) draw(api, reply.imagePrompt)
+            } catch (e: CancellationException) {
+                throw e
             } catch (e: Exception) {
                 Log.w("Budu", "Chat failed", e)
                 _ui.update { it.copy(isThinking = false) }
-                say(Lines.oops(), Emotion.SAD, caption = "Can't reach the server: ${e.message}")
+                // Server unreachable, so it can't make the natural voice either.
+                say(Lines.oops(), Emotion.SAD, caption = "Can't reach the server: ${e.message}", tabletVoiceOnly = true)
             }
         }
     }
@@ -166,9 +192,47 @@ class BuduViewModel(app: Application) : AndroidViewModel(app) {
         }
     }
 
-    private fun say(text: String, emotion: Emotion, caption: String = text) {
+    /**
+     * Show [emotion] and say [text]:
+     * - [audio] given: play it (natural voice, already made by the server)
+     * - natural voice on: ask the server for it, fall back to the tablet voice
+     * - otherwise: tablet voice
+     */
+    private fun say(
+        text: String,
+        emotion: Emotion,
+        caption: String = text,
+        audio: ByteArray? = null,
+        tabletVoiceOnly: Boolean = false,
+    ) {
         _ui.update { it.copy(emotion = emotion, caption = caption) }
-        speaker.speak(text, locale)
+        speakLine(text, audio, tabletVoiceOnly)
+    }
+
+    private fun speakLine(text: String, audio: ByteArray? = null, tabletVoiceOnly: Boolean = false) {
+        voiceJob?.cancel()
+        val s = _settings.value
+        val loc = locale
+        when {
+            audio != null -> speaker.playAudio(audio, text, loc)
+            tabletVoiceOnly || !s.naturalVoice -> speaker.speak(text, loc)
+            else -> voiceJob = viewModelScope.launch {
+                val mp3 = try {
+                    BuduApi(s.serverUrl, s.appToken).speak(text, s.languageTag)
+                } catch (e: CancellationException) {
+                    throw e // Budu was interrupted: say nothing
+                } catch (e: Exception) {
+                    Log.w("Budu", "Natural voice unavailable", e)
+                    null
+                }
+                if (mp3 != null) speaker.playAudio(mp3, text, loc) else speaker.speak(text, loc)
+            }
+        }
+    }
+
+    private fun stopTalking() {
+        voiceJob?.cancel()
+        speaker.stop()
     }
 
     private fun addToHistory(turn: ChatTurn) {
@@ -191,7 +255,7 @@ class BuduViewModel(app: Application) : AndroidViewModel(app) {
             _ui.update {
                 it.copy(timeIsUp = true, isListening = false, picture = null, emotion = Emotion.SLEEPY, caption = "")
             }
-            if (announce) speaker.speak(Lines.sleepy(_settings.value.childName), locale)
+            if (announce) speakLine(Lines.sleepy(_settings.value.childName))
         } else if (!up && was) {
             _ui.update { it.copy(timeIsUp = false, emotion = Emotion.HAPPY) }
         } else if (up) {
@@ -205,7 +269,7 @@ class BuduViewModel(app: Application) : AndroidViewModel(app) {
         parentMode = enabled
         if (enabled) {
             listener.stop()
-            speaker.stop()
+            stopTalking()
             _ui.update { it.copy(isListening = false) }
         }
     }
