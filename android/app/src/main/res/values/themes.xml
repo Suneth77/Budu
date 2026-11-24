@@ -1,0 +1,5 @@
+<resources>
+    <style name="Theme.Budu" parent="android:Theme.Material.Light.NoActionBar">
+        <item name="android:windowBackground">#FFFFF8E1</item>
+    </style>
+</resources>
