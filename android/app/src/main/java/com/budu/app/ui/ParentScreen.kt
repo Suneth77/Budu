@@ -59,6 +59,7 @@ fun ParentScreen(
             Text("Parent settings", style = MaterialTheme.typography.headlineMedium)
             Text("Played today: $usedMinutesToday min", style = MaterialTheme.typography.bodyLarge)
 
+
             OutlinedTextField(
                 value = childName, onValueChange = { childName = it.take(40) },
                 label = { Text("Child's first name (optional)") }, singleLine = true,
@@ -136,3 +137,4 @@ fun ParentScreen(
         }
     }
 }
+

@@ -14,7 +14,10 @@ import json
 import logging
 import os
 import re
+import threading
 import time
+from datetime import datetime, timezone
+from pathlib import Path
 from collections import defaultdict, deque
 
 from dotenv import load_dotenv
@@ -49,8 +52,27 @@ GOOGLE_TTS_API_KEY = os.getenv("GOOGLE_TTS_API_KEY", "")
 GOOGLE_TTS_VOICE = os.getenv("GOOGLE_TTS_VOICE", "Leda")  # a Chirp 3 HD voice name
 GOOGLE_TTS_SPEAKING_RATE = os.getenv("GOOGLE_TTS_SPEAKING_RATE", "")  # e.g. 0.9; empty = normal
 MAX_SPEAK_PER_MINUTE = int(os.getenv("MAX_SPEAK_PER_MINUTE", "40"))
+# Google gives 1,000,000 free Chirp 3 HD characters per month, then charges.
+# Budu stops using the Google voice at this many characters (tablet voice takes over)
+# and starts again on the 1st of next month. Set to 0 for no limit.
+GOOGLE_TTS_MONTHLY_CHAR_LIMIT = int(os.getenv("GOOGLE_TTS_MONTHLY_CHAR_LIMIT", "950000"))
+TTS_USAGE_FILE = Path(__file__).with_name("tts_usage.json")
 
 EMOTIONS = {"happy", "excited", "surprised", "sad", "calm", "curious"}
+
+# The friends the parent can choose in the app: (name, what they are, personality touch)
+CHARACTERS = {
+    "budu": ("Budu", "a gentle, playful, round cartoon friend",
+             "You love colors, bubbles and silly games."),
+    "dino": ("Dino", "a cute, friendly little green dinosaur",
+             "You love stomping, roaring very softly (rawr!), and talking about plants and eggs. You are never scary."),
+    "robot": ("Robo", "a friendly, curious little robot",
+              "You sometimes say beep-boop, love counting and shapes, and are curious how things work."),
+    "monkey": ("Miko", "a cheeky, playful little monkey",
+               "You love bananas, climbing trees (only pretend!), and funny jokes. Remind the child never to climb high for real."),
+    "car": ("Vroom", "a happy little red car",
+            "You love driving, saying vroom-vroom, colors of traffic lights, and road safety (always hold a grown-up's hand near roads)."),
+}
 
 claude = Anthropic()  # reads ANTHROPIC_API_KEY from the environment
 app = FastAPI(title="Budu server")
@@ -69,6 +91,7 @@ class ChatRequest(BaseModel):
     child_name: str | None = Field(default=None, max_length=40)
     language: str = Field(default="English", max_length=40)
     images_enabled: bool = True
+    character: str = Field(default="budu", max_length=20)
     voice_language: str | None = Field(default=None, max_length=20)  # e.g. "et-EE"; set = return audio too
 
 
@@ -139,7 +162,8 @@ def system_prompt(body: ChatRequest) -> str:
         else "Pictures are switched off by the parent. Always set image_prompt to null; "
         "if the child asks for a picture, suggest they draw one together with a grown-up."
     )
-    return f"""You are Budu, a gentle, playful, round cartoon friend inside a tablet app, talking with {who}.
+    me, what, personality = CHARACTERS.get(body.character.lower(), CHARACTERS["budu"])
+    return f"""You are {me}, {what} inside a tablet app, talking with {who}. {personality}
 
 How you talk:
 - Speak {body.language}.
@@ -149,7 +173,7 @@ How you talk:
 - You can play pretend, sing simple made-up songs, count, name colors and animals, tell tiny stories.
 
 Safety rules (always follow):
-- You are a pretend friend, not a person. If asked, say you are Budu who lives in the tablet.
+- You are a pretend friend, not a person. If asked, say you are {me} who lives in the tablet.
 - Never talk about violence, scary things, death, adult topics, or anything unsafe. Gently change the subject to something fun.
 - Never ask for personal information (address, school, last name, passwords, photos).
 - Never suggest anything dangerous (climbing high, touching the stove, going outside alone, eating unknown things, medicine).
@@ -186,9 +210,48 @@ _SHORT_LANG = {"en": "en-US", "et": "et-EE", "ru": "ru-RU", "fi": "fi-FI", "de":
                "lv": "lv-LV", "lt": "lt-LT", "uk": "uk-UA", "sv": "sv-SE", "fr": "fr-FR", "es": "es-ES"}
 
 
+_tts_lock = threading.Lock()
+
+
+def _this_month() -> str:
+    return datetime.now(timezone.utc).strftime("%Y-%m")  # Google's billing month is UTC-based
+
+
+def tts_chars_used() -> int:
+    """Characters sent to Google this month (kept in tts_usage.json, survives restarts)."""
+    try:
+        data = json.loads(TTS_USAGE_FILE.read_text())
+        return int(data.get("chars", 0)) if data.get("month") == _this_month() else 0
+    except (OSError, ValueError):
+        return 0
+
+
+def _reserve_tts_chars(n: int) -> bool:
+    """Count n characters against this month's limit. False if they don't fit."""
+    with _tts_lock:
+        used = tts_chars_used()
+        if GOOGLE_TTS_MONTHLY_CHAR_LIMIT and used + n > GOOGLE_TTS_MONTHLY_CHAR_LIMIT:
+            return False
+        TTS_USAGE_FILE.write_text(json.dumps({"month": _this_month(), "chars": used + n}))
+        return True
+
+
+_limit_logged_month = ""
+
+
 def synthesize(text: str, language_tag: str | None) -> str | None:
-    """Turn text into speech with a Google Chirp 3 HD voice. Returns base64 MP3, or None."""
+    """Turn text into speech with a Google Chirp 3 HD voice. Returns base64 MP3, or None
+    (None makes the app use the tablet voice instead)."""
+    global _limit_logged_month
     if not GOOGLE_TTS_API_KEY or not text.strip():
+        return None
+    # Google bills every character, spaces included. Counted before the call so an
+    # unexpected failure errs on the safe (cheaper) side.
+    if not _reserve_tts_chars(len(text)):
+        if _limit_logged_month != _this_month():
+            _limit_logged_month = _this_month()
+            log.warning("Monthly Google voice limit reached (%s chars): using the tablet voice until next month",
+                        GOOGLE_TTS_MONTHLY_CHAR_LIMIT)
         return None
     tag = (language_tag or "en-US").strip().replace("_", "-")
     if re.fullmatch(r"[a-z]{2,3}", tag):
@@ -242,7 +305,14 @@ def parse_budu_json(raw: str) -> dict:
 
 @app.get("/health")
 def health():
-    return {"ok": True, "model": CLAUDE_MODEL, "images": bool(OPENAI_API_KEY), "voice": bool(GOOGLE_TTS_API_KEY)}
+    return {
+        "ok": True,
+        "model": CLAUDE_MODEL,
+        "images": bool(OPENAI_API_KEY),
+        "voice": bool(GOOGLE_TTS_API_KEY),
+        "voice_chars_this_month": tts_chars_used(),
+        "voice_monthly_limit": GOOGLE_TTS_MONTHLY_CHAR_LIMIT,
+    }
 
 
 @app.post("/chat", response_model=ChatResponse)

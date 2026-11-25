@@ -6,6 +6,7 @@ import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.core.RepeatMode
+import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.animateFloat
 import androidx.compose.animation.core.infiniteRepeatable
 import androidx.compose.animation.core.rememberInfiniteTransition
@@ -15,10 +16,10 @@ import androidx.compose.animation.fadeOut
 import androidx.compose.animation.scaleIn
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.interaction.MutableInteractionSource
-import androidx.compose.foundation.interaction.collectIsPressedAsState
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -28,10 +29,10 @@ import androidx.compose.foundation.layout.aspectRatio
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.safeDrawingPadding
 import androidx.compose.foundation.layout.size
-import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.KeyboardOptions
@@ -41,6 +42,7 @@ import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -66,25 +68,35 @@ import androidx.compose.ui.unit.sp
 import androidx.core.content.ContextCompat
 import com.budu.app.UiState
 import com.budu.app.face.BuduFace
+import com.budu.app.face.Character
 
 @Composable
 fun KidScreen(
     ui: UiState,
+    character: Character,
     pin: String,
-    onTalk: () -> Unit,
+    onFaceTap: () -> Unit,
+    onMicGranted: () -> Unit,
+    onPickFriend: (Character) -> Unit,
     onClosePicture: () -> Unit,
     onParentUnlocked: () -> Unit,
 ) {
     val context = LocalContext.current
     val askMic = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
-        if (granted) onTalk()
+        if (granted) onMicGranted()
     }
+    fun micGranted() = ContextCompat.checkSelfPermission(context, Manifest.permission.RECORD_AUDIO) ==
+        PackageManager.PERMISSION_GRANTED
+
+    // No mic button any more: ask for the microphone as soon as the screen opens.
+    LaunchedEffect(Unit) {
+        if (!micGranted()) askMic.launch(Manifest.permission.RECORD_AUDIO)
+    }
+
     val haptic = LocalHapticFeedback.current
-    val talk = {
+    val tapFace = {
         haptic.performHapticFeedback(HapticFeedbackType.LongPress) // instant "I felt that" buzz
-        val granted = ContextCompat.checkSelfPermission(context, Manifest.permission.RECORD_AUDIO) ==
-            PackageManager.PERMISSION_GRANTED
-        if (granted) onTalk() else askMic.launch(Manifest.permission.RECORD_AUDIO)
+        if (micGranted()) onFaceTap() else askMic.launch(Manifest.permission.RECORD_AUDIO)
     }
     var showPin by remember { mutableStateOf(false) }
     val noRipple = remember { MutableInteractionSource() }
@@ -103,23 +115,28 @@ fun KidScreen(
             BuduFace(
                 emotion = ui.emotion,
                 isTalking = ui.isSpeaking,
+                character = character,
                 modifier = Modifier
-                    .fillMaxWidth()
+                    .weight(1f, fill = false) // leaves room for the buttons below on any screen
                     .aspectRatio(1f)
-                    .clickable(interactionSource = noRipple, indication = null) { talk() },
+                    .clickable(interactionSource = noRipple, indication = null) { tapFace() },
             )
 
             Spacer(Modifier.height(16.dp))
 
-            when {
-                ui.timeIsUp -> Text("💤", fontSize = 64.sp)
-                ui.isThinking -> Text("💭", fontSize = 56.sp)
-                ui.isDrawing -> Row(verticalAlignment = Alignment.CenterVertically) {
-                    TalkButton(listening = ui.isListening, ready = ui.micReady, onClick = talk)
-                    Spacer(Modifier.width(24.dp))
-                    DrawingIndicator()
+            // What's happening right now (fixed height, so nothing jumps around).
+            Row(
+                Modifier.height(96.dp),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(24.dp),
+            ) {
+                when {
+                    ui.timeIsUp -> Text("💤", fontSize = 64.sp)
+                    ui.isThinking -> Text("💭", fontSize = 56.sp)
+                    ui.isListening -> ListeningIndicator(ready = ui.micReady)
+                    !ui.conversationOn && !ui.isSpeaking -> TapMeHint()
                 }
-                else -> TalkButton(listening = ui.isListening, ready = ui.micReady, onClick = talk)
+                if (ui.isDrawing) DrawingIndicator()
             }
 
             Spacer(Modifier.height(16.dp))
@@ -131,6 +148,16 @@ fun KidScreen(
                 fontSize = 16.sp,
                 textAlign = TextAlign.Center,
                 modifier = Modifier.alpha(0.8f),
+            )
+
+            Spacer(Modifier.height(20.dp))
+
+            FriendPicker(
+                selected = character,
+                onPick = {
+                    haptic.performHapticFeedback(HapticFeedbackType.LongPress)
+                    onPickFriend(it)
+                },
             )
         }
 
@@ -157,7 +184,7 @@ fun KidScreen(
                 ) {
                     Image(
                         bitmap = bmp.asImageBitmap(),
-                        contentDescription = "Budu's picture",
+                        contentDescription = "${character.displayName}'s picture",
                         contentScale = ContentScale.Crop,
                         modifier = Modifier
                             .fillMaxWidth(0.9f)
@@ -189,37 +216,64 @@ fun KidScreen(
 }
 
 /**
- * Big talk button.
- *  blue 🎤   = tap me
- *  orange 🎤 = getting the mic ready (wait a moment)
- *  red 👂    = mic is open, talk now!
+ * Shown while the mic is open (always visible, so grown-ups can see when it's listening).
+ *  orange = getting ready, red = listening now
  */
 @Composable
-private fun TalkButton(listening: Boolean, ready: Boolean, onClick: () -> Unit) {
-    val interaction = remember { MutableInteractionSource() }
-    val pressed by interaction.collectIsPressedAsState()
-    val talkNow = listening && ready
-    val pulse = rememberInfiniteTransition(label = "pulse")
-    val wobble by pulse.animateFloat(
-        initialValue = 1f, targetValue = if (talkNow) 1.15f else 1.04f,
-        animationSpec = infiniteRepeatable(tween(if (talkNow) 400 else 1200), RepeatMode.Reverse),
-        label = "scale",
+private fun ListeningIndicator(ready: Boolean) {
+    val pulse = rememberInfiniteTransition(label = "listen")
+    val grow by pulse.animateFloat(
+        initialValue = 1f, targetValue = if (ready) 1.15f else 1.04f,
+        animationSpec = infiniteRepeatable(tween(if (ready) 400 else 900), RepeatMode.Reverse),
+        label = "grow",
     )
-    val color = when {
-        talkNow -> Color(0xFFEF5350)
-        listening -> Color(0xFFFFA726)
-        else -> Color(0xFF42A5F5)
-    }
     Box(
         Modifier
-            .size(112.dp)
-            .scale(if (pressed) 0.88f else wobble) // shrinks the instant a finger touches it
+            .size(88.dp)
+            .scale(grow)
             .clip(CircleShape)
-            .background(color)
-            .clickable(interactionSource = interaction, indication = null, enabled = !listening) { onClick() },
+            .background(if (ready) Color(0xFFEF5350) else Color(0xFFFFA726)),
         contentAlignment = Alignment.Center,
     ) {
-        Text(if (talkNow) "👂" else "🎤", fontSize = 52.sp)
+        Text("👂", fontSize = 44.sp)
+    }
+}
+
+/** Shown when the conversation has paused: a bouncing finger says "tap the face". */
+@Composable
+private fun TapMeHint() {
+    val bounce = rememberInfiniteTransition(label = "tap")
+    val dy by bounce.animateFloat(
+        initialValue = 0f, targetValue = -14f,
+        animationSpec = infiniteRepeatable(tween(500), RepeatMode.Reverse),
+        label = "dy",
+    )
+    Text("👆", fontSize = 56.sp, modifier = Modifier.offset(y = dy.dp))
+}
+
+/** A row of big round buttons, one per friend. Tap to switch anytime. */
+@Composable
+private fun FriendPicker(selected: Character, onPick: (Character) -> Unit) {
+    Row(
+        horizontalArrangement = Arrangement.spacedBy(12.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Character.entries.forEach { c ->
+            val isSelected = c == selected
+            val grow by animateFloatAsState(if (isSelected) 1.15f else 1f, label = "pick")
+            Box(
+                Modifier
+                    .size(64.dp)
+                    .scale(grow)
+                    .clip(CircleShape)
+                    .background(if (isSelected) Color(0xFFFFCC80) else Color.White.copy(alpha = 0.7f))
+                    .then(if (isSelected) Modifier.border(3.dp, Color(0xFFFB8C00), CircleShape) else Modifier)
+                    .clickable { onPick(c) },
+                contentAlignment = Alignment.Center,
+            ) {
+                Text(c.emoji, fontSize = 34.sp)
+            }
+        }
     }
 }
 

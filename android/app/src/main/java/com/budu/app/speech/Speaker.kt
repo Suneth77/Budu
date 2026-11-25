@@ -3,6 +3,8 @@ package com.budu.app.speech
 import android.content.Context
 import android.media.AudioAttributes
 import android.media.MediaPlayer
+import android.os.Handler
+import android.os.Looper
 import android.speech.tts.TextToSpeech
 import android.speech.tts.UtteranceProgressListener
 import android.util.Log
@@ -15,11 +17,19 @@ import java.util.Locale
  * - [speak] uses the tablet's built-in text-to-speech; it's also the automatic
  *   backup if the MP3 can't be played.
  * [onSpeakingChanged] drives the talking mouth animation.
+ * [onFinished] is called (on the main thread) only when a line was spoken to the end,
+ * not when it was stopped. That's the cue to start listening to the child.
  */
 class Speaker(
     context: Context,
     private val onSpeakingChanged: (Boolean) -> Unit,
+    private val onFinished: () -> Unit = {},
 ) : TextToSpeech.OnInitListener {
+
+    private val main = Handler(Looper.getMainLooper())
+
+    @Volatile
+    private var currentId: String? = null // the tablet-voice line that is playing right now
 
     private val appContext = context.applicationContext
     private val tts = TextToSpeech(appContext, this)
@@ -35,10 +45,10 @@ class Speaker(
         tts.setSpeechRate(0.9f) // a bit slower for little ears
         tts.setOnUtteranceProgressListener(object : UtteranceProgressListener() {
             override fun onStart(utteranceId: String?) = onSpeakingChanged(true)
-            override fun onDone(utteranceId: String?) = onSpeakingChanged(false)
+            override fun onDone(utteranceId: String?) = finished(utteranceId)
             @Deprecated("Deprecated in Java")
-            override fun onError(utteranceId: String?) = onSpeakingChanged(false)
-            override fun onError(utteranceId: String?, errorCode: Int) = onSpeakingChanged(false)
+            override fun onError(utteranceId: String?) = finished(utteranceId)
+            override fun onError(utteranceId: String?, errorCode: Int) = finished(utteranceId)
             override fun onStop(utteranceId: String?, interrupted: Boolean) = onSpeakingChanged(false)
         })
         pending?.let { (text, locale) -> speak(text, locale) }
@@ -53,7 +63,20 @@ class Speaker(
             return
         }
         tts.language = locale
-        tts.speak(text, TextToSpeech.QUEUE_FLUSH, null, "budu-${System.currentTimeMillis()}")
+        val id = "budu-${System.nanoTime()}"
+        currentId = id
+        tts.speak(text, TextToSpeech.QUEUE_FLUSH, null, id)
+    }
+
+    // Called from the text-to-speech thread when a line ends (or fails).
+    private fun finished(utteranceId: String?) {
+        onSpeakingChanged(false)
+        main.post {
+            if (utteranceId != null && utteranceId == currentId) {
+                currentId = null
+                onFinished()
+            }
+        }
     }
 
     /** Play the natural voice MP3. Falls back to [speak] with [fallbackText] if playback fails. */
@@ -75,8 +98,11 @@ class Speaker(
                 onSpeakingChanged(true)
             }
             p.setOnCompletionListener {
-                releasePlayer()
-                onSpeakingChanged(false)
+                if (player === it) {
+                    releasePlayer()
+                    onSpeakingChanged(false)
+                    onFinished()
+                }
             }
             p.setOnErrorListener { _, what, extra ->
                 Log.w("Budu", "Voice playback failed ($what/$extra), using tablet voice")
@@ -95,6 +121,7 @@ class Speaker(
 
     fun stop() {
         pending = null
+        currentId = null // a stopped line doesn't count as "finished"
         releasePlayer()
         if (ready) tts.stop()
         onSpeakingChanged(false)

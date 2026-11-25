@@ -1,6 +1,7 @@
 # Budu: a talking cartoon friend for 3–4 year olds
 
-Budu is a round, animated character. The child taps Budu (or the big 🎤 button) and talks.
+Budu (or Dino, Robo, Miko, Vroom) is an animated friend that talks with the child hands-free: after it
+speaks, it listens automatically. After ~20 seconds of silence it stops listening; tapping the face starts again.
 Budu listens, thinks, answers out loud with a matching facial expression, and can draw
 a picture when the child asks for one.
 
@@ -67,7 +68,7 @@ You can also try http://localhost:8000/docs to send a test message without the p
    - **Real phone on the same Wi-Fi:** `http://<your Mac's IP>:8000`. Find the IP in
      System Settings → Wi-Fi → Details.
    - Enter the **App token**, the child's name and the language (for example `et-EE` for Estonian), then change the PIN.
-5. Go back to Budu, tap the face, and talk.
+5. Go back to Budu and just talk. Budu listens by itself after it finishes speaking.
 
 > Emulator microphone: in the emulator's ⋯ menu → Microphone, enable "Virtual microphone uses host audio input".
 

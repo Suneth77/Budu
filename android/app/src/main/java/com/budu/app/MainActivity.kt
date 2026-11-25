@@ -12,6 +12,7 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import com.budu.app.face.Character
 import com.budu.app.ui.KidScreen
 import com.budu.app.ui.ParentScreen
 
@@ -58,8 +59,11 @@ private fun BuduApp(vm: BuduViewModel) {
         } else {
             KidScreen(
                 ui = ui,
+                character = Character.from(settings.character),
                 pin = settings.pin,
-                onTalk = vm::onTalkTapped,
+                onFaceTap = vm::onFaceTapped,
+                onMicGranted = vm::onMicPermissionGranted,
+                onPickFriend = vm::selectCharacter,
                 onClosePicture = vm::closePicture,
                 onParentUnlocked = {
                     inParentArea = true

@@ -26,6 +26,7 @@ class BuduApi(private val baseUrl: String, private val appToken: String) {
         language: String,
         imagesEnabled: Boolean,
         voiceLanguage: String?, // e.g. "et-EE" to also get the reply as audio; null = no audio
+        character: String,      // "budu", "dino", "robot", "monkey", "car"
     ): BuduReply = withContext(Dispatchers.IO) {
         val body = JSONObject().apply {
             put("message", message)
@@ -38,6 +39,7 @@ class BuduApi(private val baseUrl: String, private val appToken: String) {
             put("language", language)
             put("images_enabled", imagesEnabled)
             if (voiceLanguage != null) put("voice_language", voiceLanguage)
+            put("character", character)
         }
         val json = post("/chat", body, readTimeoutMs = 30_000)
         BuduReply(
